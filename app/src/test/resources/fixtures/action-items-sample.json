@@ -1,0 +1,58 @@
+[
+  {
+    "title": "Post the weekly project update — it's overdue",
+    "priority": "🔴",
+    "status": "done",
+    "section": "🔴 Urgent / Time-Sensitive",
+    "short_prefix": "QPD1"
+  },
+  {
+    "title": "Email the external vendor about the contract renewal — committed to \"today or tomorrow\"",
+    "priority": "🔴",
+    "status": "open",
+    "section": "🔴 Urgent / Time-Sensitive",
+    "short_prefix": "VEND"
+  },
+  {
+    "title": "Triage the early-access feedback and the blocking 401 bug from the editor PoC",
+    "priority": "🟡",
+    "status": "open",
+    "section": "🟡 To Do (work)",
+    "short_prefix": "FEED"
+  },
+  {
+    "title": "Watch the release-freeze incident for the all-clear before cutting a release",
+    "priority": "🟢",
+    "status": "open",
+    "section": "🟢 Watching (no action yet)",
+    "short_prefix": "RELZ"
+  },
+  {
+    "title": "Post the Friday updates — use the weekly-report skill",
+    "priority": "",
+    "status": "open",
+    "section": "💡 Today's Focus",
+    "short_prefix": null
+  },
+  {
+    "title": "Both weekly updates posted in the afternoon session",
+    "priority": "🟡",
+    "status": "done",
+    "section": "🟡 To Do (work)",
+    "short_prefix": "WKLY"
+  },
+  {
+    "title": "Glance at the unread notifications when convenient",
+    "priority": "🟢",
+    "status": "done",
+    "section": "🟢 Watching (no action yet)",
+    "short_prefix": "NOTIF"
+  },
+  {
+    "title": "Access-request workspace task — done",
+    "priority": "",
+    "status": "done",
+    "section": "✅ Recently Completed",
+    "short_prefix": "ACCS"
+  }
+]

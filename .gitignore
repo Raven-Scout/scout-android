@@ -1,0 +1,11 @@
+.gradle/
+build/
+app/build/
+local.properties
+.DS_Store
+.idea/
+*.iml
+app/google-services.json
+/captures/
+.kotlin/
+bridge/**/__pycache__/
