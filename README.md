@@ -1,7 +1,7 @@
 # Scout Android
 
-Scout's **third surface** — the Android companion to the [Scout engine](~/Scout) (scheduled
-brain) and [Scout.app](https://github.com/jordanrburger/scout-app) (macOS daily driver).
+Scout's **third surface** — the Android companion to the [Scout engine](https://github.com/Raven-Scout/scout-plugin) (scheduled
+brain) and [Scout.app](https://github.com/Raven-Scout/Scout) (macOS daily driver).
 
 What it does (v1):
 
