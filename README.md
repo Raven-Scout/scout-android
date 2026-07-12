@@ -89,3 +89,19 @@ bridge/tests/e2e-smoke.sh                   # end-to-end against a fixture-copy 
 Design specs + implementation plans are maintained privately (they reference the
 author's personal Scout vault); this public repo carries the app + bridge code,
 its tests, and synthetic test fixtures.
+
+## License & legal
+
+This app is open-source under the [MIT License](LICENSE).
+
+Scout is local-first and collects no data of its own. Captured notifications are stored in a
+local database on your phone and forwarded **only to your own paired Mac over your local
+network** — never to us or any third-party server. The app does not read SMS or health data, and
+push notifications (FCM) are dormant unless you add your own Firebase config. See the project's
+shared legal documents:
+
+- **Privacy Policy** — https://raven-scout.github.io/scout-plugin/privacy.html
+- **Terms of Use** — https://raven-scout.github.io/scout-plugin/terms.html
+- **[Security Policy](https://github.com/Raven-Scout/.github/blob/main/SECURITY.md)** · **[Code of Conduct](https://github.com/Raven-Scout/.github/blob/main/CODE_OF_CONDUCT.md)**
+
+Scout is an independent project, not affiliated with Anthropic, Microsoft, Keboola, Google, or any other company.
