@@ -247,7 +247,7 @@ def make_server(config: BridgeConfig) -> ThreadingHTTPServer:
             return self.reply(200, result)
 
         def handle_run_log(self, run_id: str, tail):
-            if not RUN_ID_RE.match(run_id):
+            if not RUN_ID_RE.fullmatch(run_id):
                 return self.reply(400, {"ok": False, "error": "bad run_id"})
             log = config.vault / ".scout-logs" / f"{run_id}.log"
             if not log.exists():
