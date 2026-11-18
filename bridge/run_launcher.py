@@ -5,11 +5,12 @@ bridge restart never kills an in-flight Scout session. See spec §3, §9."""
 
 import json
 import os
-import re
 import subprocess
 from pathlib import Path
 
-RUN_ID_RE = re.compile(r"^[a-z]+-\d{4}-\d{2}-\d{2}_\d{2}-\d{2}$")
+# Both run-log name forms (Raven-Scout/Scout#673); scout_bridge also guards the
+# run-log route with it. Use RUN_ID_RE.fullmatch: `$` alone admits a trailing "\n".
+from status_reader import RUN_ID_RE, is_lock_skip, parse_run_id  # noqa: F401
 
 # Phone "run now" type → runner script + whether it needs SCOUT_FORCE_MODE.
 TYPE_RUNNERS = {
@@ -49,7 +50,7 @@ class RunLauncher:
         return self._launch(runner, force_mode, bypass_budget, retry_of=None)
 
     def retry(self, run_id, bypass_budget=False):
-        if not RUN_ID_RE.match(run_id or ""):
+        if parse_run_id(run_id) is None:
             return {"started": False, "reason": "bad_run_id"}
         run_type = self.lookup_type(run_id)
         if run_type is None or run_type not in TYPE_RUNNERS:
@@ -85,13 +86,21 @@ class RunLauncher:
 
     def lookup_type(self, run_id):
         """Recorded mode for a finished run, from usage-tracker / session-tokens.
-        Correlates by the run_id's local HH:MM (the log basename is local time)."""
-        m = re.match(r"^[a-z]+-(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})$", run_id)
-        if not m:
+        Correlates by the run_id's local HH:MM (the log basename is local time),
+        for both name forms; a fallback name's seconds and PID don't narrow it,
+        as usage-tracker stamps are to the minute.
+
+        A run the session lock skipped has no mode of its own: the usage record
+        in its minute belongs to the run that held the lock."""
+        parsed = parse_run_id(run_id)
+        if parsed is None:
             return None
-        y, mo, d, hh, mm = m.groups()
-        day = f"{y}-{mo}-{d}"
+        _kind, started, _pid = parsed
+        day = started.strftime("%Y-%m-%d")
+        hh, mm = started.hour, started.minute
         logs = self.vault / ".scout-logs"
+        if is_lock_skip(logs / f"{run_id}.log"):
+            return None
         # usage-tracker.type is the semantic mode; match the nearest entry that
         # day at-or-after the run's start minute.
         usage = logs / "usage-tracker.jsonl"

@@ -7,7 +7,7 @@ from datetime import datetime
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from status_reader import StatusReader  # noqa: E402
+from status_reader import StatusReader, is_lock_skip, parse_run_id  # noqa: E402
 
 
 def build_vault(tmp):
@@ -67,6 +67,135 @@ class RunsTest(unittest.TestCase):
     def test_running_false_with_stale_lock_pid(self):
         (self.v / ".scout-logs" / ".scout-session.lock").write_text("999999")
         self.assertFalse(StatusReader(self.v, now=self.now).running()["active"])
+
+
+LOCK_SKIP = "=== Another Scout session running (PID 4242) — skipping after a 600s wait ===\n"
+LOCK_WAIT = "=== Another Scout session running (PID 4242) — waiting up to 600s for the lock ===\n"
+
+
+class RunIdTest(unittest.TestCase):
+    """Run-log names since Raven-Scout/Scout#673: the minute name, or -SS-<PID>."""
+
+    def test_minute_name_keeps_its_id_and_minute(self):
+        self.assertEqual(parse_run_id("scout-2026-11-13_17-57"),
+                         ("scout", datetime(2026, 11, 13, 17, 57), None))
+
+    def test_fallback_name_adds_seconds_and_pid(self):
+        self.assertEqual(parse_run_id("dreaming-2026-11-13_17-57-30-48213"),
+                         ("dreaming", datetime(2026, 11, 13, 17, 57, 30), 48213))
+
+    def test_malformed_names_rejected(self):
+        for bad in ["scout-2026-11-13_17-57-30",       # seconds without a PID
+                    "scout-2026-11-13_17-57-30-",      # empty PID
+                    "scout-2026-11-13_17-57-3-48213",  # one-digit seconds
+                    "scout-2026-11-13_17-57\n",        # trailing newline
+                    "Scout-2026-11-13_17-57",          # stem is lowercase
+                    "scout-2026-13-13_17-57",          # no month 13
+                    "launchd-heartbeat", "", None]:
+            self.assertIsNone(parse_run_id(bad), bad)
+
+    def test_recent_runs_ids_are_log_basenames_in_both_forms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp) / ".scout-logs"
+            logs.mkdir()
+            (logs / "scout-2026-11-13_17-57.log").write_text("x\n")
+            (logs / "scout-2026-11-13_17-57-30-48213.log").write_text("x\n")
+            runs = {r["id"]: r for r in StatusReader(tmp, now=datetime(2026, 11, 13, 19)).recent_runs()}
+        self.assertEqual(set(runs), {"scout-2026-11-13_17-57", "scout-2026-11-13_17-57-30-48213"})
+        self.assertEqual(runs["scout-2026-11-13_17-57"]["started_at"], "2026-11-13T17:57:00")
+        self.assertEqual(runs["scout-2026-11-13_17-57-30-48213"]["started_at"], "2026-11-13T17:57:30")
+
+    def test_sort_is_minute_then_second_then_pid(self):
+        names = [
+            "scout-2026-11-13_17-56-59-1",
+            "scout-2026-11-13_17-57",             # claimed the minute: its first run
+            "scout-2026-11-13_17-57-05-100000",
+            "scout-2026-11-13_17-57-30-9999",     # text order would put this after 48213
+            "scout-2026-11-13_17-57-30-48213",
+            "research-2026-11-13_17-58",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp) / ".scout-logs"
+            logs.mkdir()
+            for n in names:
+                (logs / f"{n}.log").write_text("x\n")
+            ids = [r["id"] for r in StatusReader(tmp, now=datetime(2026, 11, 13, 19)).recent_runs()]
+        self.assertEqual(ids, list(reversed(names)))
+
+
+class LockSkipTest(unittest.TestCase):
+    """A run the session lock turned away must not displace the live run."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.v = Path(self.tmp.name)
+        self.logs = self.v / ".scout-logs"
+        self.logs.mkdir()
+        self.now = datetime(2026, 11, 13, 18, 30)
+        with (self.logs / "usage-tracker.jsonl").open("w") as f:
+            # The live run's record, written when it finishes; a skip in its
+            # minute must not borrow it.
+            f.write(json.dumps({"ts_local": "2026-11-13 18:20 EST", "type": "consolidation",
+                                "exit_code": 0, "source": "runner"}) + "\n")
+        (self.logs / "session-tokens.jsonl").write_text(
+            json.dumps({"ts_et": "2026-11-13 17:57 EST", "cost_usd": 4.0}) + "\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def lock(self, pid):
+        (self.logs / ".scout-session.lock").write_text(str(pid))
+
+    def test_waiting_line_alone_is_not_a_skip(self):
+        (self.logs / "scout-2026-11-13_17-57.log").write_text(LOCK_WAIT + "session output\n")
+        (self.logs / "scout-2026-11-13_17-58.log").write_text(LOCK_WAIT + LOCK_SKIP)
+        self.assertFalse(is_lock_skip(self.logs / "scout-2026-11-13_17-57.log"))
+        self.assertTrue(is_lock_skip(self.logs / "scout-2026-11-13_17-58.log"))
+        self.assertFalse(is_lock_skip(self.logs / "missing.log"))
+
+    def test_same_minute_skip_leaves_live_run_running(self):
+        (self.logs / "scout-2026-11-13_17-57.log").write_text("session output\n")
+        (self.logs / "scout-2026-11-13_17-57-30-48213.log").write_text(LOCK_SKIP)
+        self.lock(os.getpid())
+        reader = StatusReader(self.v, now=self.now)
+        live = reader.running()
+        self.assertEqual(live["run_id"], "scout-2026-11-13_17-57")
+        self.assertEqual(live["started_at"], "2026-11-13T17:57:00")
+        runs = {r["id"]: r for r in reader.recent_runs()}
+        self.assertEqual(runs["scout-2026-11-13_17-57"]["outcome"], "running")
+        skip = runs["scout-2026-11-13_17-57-30-48213"]
+        self.assertEqual(skip["outcome"], "skipped")
+        self.assertEqual(skip["spend_usd"], 0.0)  # the minute's spend is the live run's
+        self.assertEqual(skip["type"], "scout")   # not the live run's usage type
+        self.assertEqual(reader.last_run()["id"], "scout-2026-11-13_17-57-30-48213")
+
+    def test_later_minute_skip_leaves_live_run_running(self):
+        (self.logs / "scout-2026-11-13_17-57.log").write_text("session output\n")
+        (self.logs / "dreaming-2026-11-13_18-05.log").write_text(LOCK_SKIP)
+        self.lock(os.getpid())
+        reader = StatusReader(self.v, now=self.now)
+        self.assertEqual(reader.running()["run_id"], "scout-2026-11-13_17-57")
+        outcomes = {r["id"]: r["outcome"] for r in reader.recent_runs()}
+        self.assertEqual(outcomes, {"scout-2026-11-13_17-57": "running",
+                                    "dreaming-2026-11-13_18-05": "skipped"})
+
+    def test_fallback_name_matching_lock_pid_is_the_live_run(self):
+        pid = os.getpid()
+        (self.logs / "scout-2026-11-13_17-57.log").write_text("exit code: 0\n")
+        (self.logs / f"scout-2026-11-13_17-57-40-{pid}.log").write_text("session output\n")
+        # Newer, still waiting for the lock: not a skip yet, but not the holder.
+        (self.logs / "research-2026-11-13_17-59.log").write_text(LOCK_WAIT)
+        self.lock(pid)
+        self.assertEqual(StatusReader(self.v, now=self.now).running()["run_id"],
+                         f"scout-2026-11-13_17-57-40-{pid}")
+
+    def test_skip_without_live_lock_is_skipped_not_success(self):
+        (self.logs / "scout-2026-11-13_17-57.log").write_text("exit code: 0\n")
+        (self.logs / "scout-2026-11-13_17-57-30-48213.log").write_text(LOCK_SKIP)
+        runs = {r["id"]: r for r in StatusReader(self.v, now=self.now).recent_runs()}
+        self.assertEqual(runs["scout-2026-11-13_17-57"]["outcome"], "success")
+        self.assertEqual(runs["scout-2026-11-13_17-57"]["spend_usd"], 4.0)
+        self.assertEqual(runs["scout-2026-11-13_17-57-30-48213"]["outcome"], "skipped")
 
 
 class StatusFieldsTest(unittest.TestCase):

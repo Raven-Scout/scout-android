@@ -9,8 +9,21 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# A run log is <type>-YYYY-MM-DD_HH-MM.log; the basename (sans .log) is the run id.
-RUN_ID_RE = re.compile(r"^([a-z]+)-(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})$")
+# A run log's name, as Scout's runners write it since Raven-Scout/Scout#673:
+# <stem>-YYYY-MM-DD_HH-MM.log for the run that claimed its minute (and every log
+# from before unique names), or <stem>-YYYY-MM-DD_HH-MM-SS-<PID>.log for a later
+# run in the same minute. The basename (sans .log) is the run id, so a
+# minute-named run keeps its old id and only the fallback id adds `-SS-<PID>`.
+# Mirrors the engine's _RUN_LOG_TAIL (plugin/engine/scout/health.py).
+RUN_ID_RE = re.compile(
+    r"([a-z]+)-(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})(?:-(\d{2})-(\d+))?"
+)
+# The line scout-lock.sh writes when a run gives up on a busy session lock. Such
+# a run never held the lock (it skips before acquiring), so it is not the live
+# run and owns no usage, spend or mode. The "waiting up to …" line that precedes
+# it is not enough: a run that waited may still have got the lock.
+_LOCK_SKIP_RE = re.compile(r"Another .* session running .*skipping")
+_LOCK_SKIP_SCAN_BYTES = 64 * 1024  # the skip line is written before any session output
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 _OUTCOME_WINDOW = timedelta(hours=4)
 _ALERT_WINDOW = timedelta(hours=24)
@@ -21,30 +34,65 @@ class StatusReader:
         self.vault = Path(vault)
         self.logs = self.vault / ".scout-logs"
         self.now = now or datetime.now()
+        self._lock_skips = {}
 
     # -- runs ----------------------------------------------------------------
     def _runs_raw(self):
-        """Every run log as (id, type, started_datetime), newest first."""
+        """Every run log as (id, type, started_datetime, pid), newest first.
+
+        Newest by (minute, second, pid), as the engine's run_log_sort_key: a
+        minute-named log is that minute's first run, and a later run in the same
+        minute sorts after it by its seconds, then its PID (numerically)."""
         out = []
         if not self.logs.is_dir():
             return out
         for path in self.logs.glob("*.log"):
-            m = RUN_ID_RE.match(path.stem)
-            if not m:
+            parsed = parse_run_id(path.stem)
+            if parsed is None:
                 continue  # excludes launchd-*.log and any non-run log
-            kind, y, mo, d, hh, mm = m.groups()
-            started = datetime(int(y), int(mo), int(d), int(hh), int(mm))
-            out.append((path.stem, kind, started))
-        out.sort(key=lambda r: r[2], reverse=True)
+            kind, started, pid = parsed
+            out.append((path.stem, kind, started, pid))
+        out.sort(key=lambda r: (r[2], r[3] or 0, r[0]), reverse=True)
         return out
+
+    def _is_lock_skip(self, run_id):
+        if run_id not in self._lock_skips:
+            self._lock_skips[run_id] = is_lock_skip(self.logs / f"{run_id}.log")
+        return self._lock_skips[run_id]
+
+    def _live_run(self, raw, pid):
+        """The run holding the session lock (PID `pid`), from `raw` (newest first).
+
+        A fallback-named log carries its runner's PID, which is the PID the lock
+        records, so a name match wins. Otherwise it is the newest log that is not
+        a lock skip: a run the lock turned away (in the live run's minute or a
+        later one) must not take the live run's place."""
+        for run in raw:
+            if run[3] is not None and run[3] == pid:
+                return run
+        for run in raw:
+            if not self._is_lock_skip(run[0]):
+                return run
+        return None
 
     def recent_runs(self, limit=10):
         raw = self._runs_raw()
-        running_id = raw[0][0] if (raw and self.running().get("active")) else None
+        live = self.running()
+        running_id = live.get("run_id") if live.get("active") else None
         usage = self._usage_entries()
         spend_by_date = self._spend_by_local_minute()
         runs = []
-        for run_id, kind, started in self._runs_raw()[:limit]:
+        for run_id, kind, started, _pid in raw[:limit]:
+            if run_id != running_id and self._is_lock_skip(run_id):
+                # No session ran, so no usage record, spend or mode is its own.
+                runs.append({
+                    "id": run_id,
+                    "type": kind,
+                    "started_at": started.isoformat(),
+                    "outcome": "skipped",
+                    "spend_usd": 0.0,
+                })
+                continue
             matched = self._match_usage(started, usage)
             if run_id == running_id:
                 outcome = "running"
@@ -101,11 +149,12 @@ class StatusReader:
             return {"active": False}
         if not _pid_alive(pid):
             return {"active": False}
-        raw = self._runs_raw()
         result = {"active": True, "pid": pid}
-        if raw:
-            _run_id, kind, started = raw[0]  # the live run is the newest log
+        live = self._live_run(self._runs_raw(), pid)
+        if live is not None:
+            run_id, kind, started, _pid = live
             matched = self._match_usage(started, self._usage_entries())
+            result["run_id"] = run_id
             result["type"] = _semantic_type(kind, matched)
             result["started_at"] = started.isoformat()
         return result
@@ -218,6 +267,32 @@ _ALERT_NAME_HINTS = [
     "Slack", "Linear", "Gmail", "Google Calendar", "Granola", "Fathom",
     "Google Drive", "GitHub", "Chrome (Google Messages)", "Google Messages", "WhatsApp",
 ]
+
+
+def parse_run_id(run_id):
+    """A run id (log basename) → (stem, started, pid), or None if it is not one.
+
+    `started` is naive local time: to the minute for a minute-named run, to the
+    second for a fallback name. `pid` is None for a minute-named run."""
+    m = RUN_ID_RE.fullmatch(run_id or "")
+    if not m:
+        return None
+    kind, y, mo, d, hh, mm, ss, pid = m.groups()
+    try:
+        started = datetime(int(y), int(mo), int(d), int(hh), int(mm), int(ss or 0))
+    except ValueError:
+        return None  # e.g. month 13 or second 61
+    return kind, started, (int(pid) if pid is not None else None)
+
+
+def is_lock_skip(log_path):
+    """Did this run log end in a session-lock skip (scout-lock.sh)?"""
+    try:
+        with open(log_path, "rb") as f:
+            head = f.read(_LOCK_SKIP_SCAN_BYTES)
+    except OSError:
+        return False
+    return _LOCK_SKIP_RE.search(head.decode("utf-8", errors="replace")) is not None
 
 
 def _semantic_type(filename_kind, matched_usage):
